@@ -264,8 +264,11 @@ print(f"Program started at {time.strftime('%H:%M:%S')}")
 # =============================================================================
 # BEAM PARAMETERS (all in mm)
 # =============================================================================
-wavelength = 790e-6     # mm, 790 nm
+wavelength = 800e-6     # mm, 800 nm
 k = 2 * np.pi / wavelength
+laser_omega_au = 0.057  # 800 nm angular frequency in a.u.
+laser_wavelength_nm = wavelength * 1e6
+lut_wavelength_tag = f'lam{laser_wavelength_nm:.0f}nm'
 
 M2x = 1.6
 M2y = 1.6
@@ -297,6 +300,7 @@ twosided_halfwidth = 4.3
 diag_x_offset = 3.8
 diag_block_size = 30.0
 diag_y_shift = 13.8
+mask_edge_width = 0.5      # mm, 0 = hard edge
 
 w_at_lens_est = w0x_measured * np.sqrt(1 + (lens_position / zRx)**2)
 focus_spot_size = M2x * wavelength * focal_length / (np.pi * w_at_lens_est)
@@ -815,14 +819,31 @@ for (m_mode, n_mode, p_mn, E_mn) in mode_fields_z0:
 
 # Apply mask
 def build_mask(X, Y, mtype, params):
+    edge_w = params.get('mask_edge_width', 0.0)
+
     if mtype == 'circular':
-        return np.where(np.sqrt(X**2 + Y**2) <= params['aperture_radius'], 1.0, 0.0)
+        r = np.sqrt(X**2 + Y**2)
+        R = params['aperture_radius']
+        if edge_w > 0:
+            return 0.5 * (1.0 - np.tanh((r - R) / edge_w))
+        return np.where(r <= R, 1.0, 0.0)
     elif mtype == 'twosided':
-        return np.where(np.abs(X) <= params['twosided_halfwidth'], 1.0, 0.0)
+        hw = params['twosided_halfwidth']
+        if edge_w > 0:
+            return 0.5 * (1.0 - np.tanh((np.abs(X) - hw) / edge_w))
+        return np.where(np.abs(X) <= hw, 1.0, 0.0)
     elif mtype == 'diagonal':
         xo = params['diag_x_offset']
         bs = params['diag_block_size']
         ys = params['diag_y_shift']
+        if edge_w > 0:
+            def smooth_rect(X, Y, x_lo, x_hi, y_lo, y_hi, ew):
+                sx = 0.5 * (np.tanh((X - x_lo) / ew) - np.tanh((X - x_hi) / ew))
+                sy = 0.5 * (np.tanh((Y - y_lo) / ew) - np.tanh((Y - y_hi) / ew))
+                return sx * sy
+            block1 = smooth_rect(X, Y, -xo - bs, -xo, ys - bs/2, ys + bs/2, edge_w)
+            block2 = smooth_rect(X, Y, xo, xo + bs, -ys - bs/2, -ys + bs/2, edge_w)
+            return 1.0 - np.clip(block1 + block2, 0, 1)
         # Block 1: left side, shifted up (away from center)
         block1 = (X >= -xo - bs) & (X <= -xo) & (Y >= ys - bs/2) & (Y <= ys + bs/2)
         # Block 2: right side, shifted down (away from center)
@@ -839,6 +860,7 @@ mask_params = {
     'diag_x_offset': diag_x_offset,
     'diag_block_size': diag_block_size,
     'diag_y_shift': diag_y_shift,
+    'mask_edge_width': mask_edge_width,
 }
 aperture_mask = build_mask(X, Y, mask_type, mask_params)
 
@@ -1262,7 +1284,7 @@ def ionization_fraction_tbi_pulse(I_peak_Wcm2, Ip_au, Zc, l, m, alpha_tl, tau_fw
     E0_au = np.sqrt(I_au)
     # Pulse parameters in a.u.
     tau_au = tau_fwhm_fs * 1e-15 / 2.4189e-17  # FWHM in a.u.
-    omega_au = 0.05767513  # 790 nm angular frequency in a.u.
+    omega_au = laser_omega_au
     T_cycle = 2.0 * np.pi / omega_au
     # Time grid: ±5*FWHM/2, step = T_cycle/20
     t_max = 5.0 * tau_au / 2.0
@@ -1325,7 +1347,7 @@ def build_tbi_ionization_lut_temporal(gas_params, tau_fwhm_fs, n_temporal=11,
 
     tau_au = tau_fwhm_fs * 1e-15 / 2.4189e-17
     sigma_au = tau_au / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-    omega_au = 0.05767513
+    omega_au = laser_omega_au
     T_cycle = 2.0 * np.pi / omega_au
 
     # Output time points: span FULL pulse (-1.5σ to +1.5σ)
@@ -1400,7 +1422,7 @@ def calc_dk_plasma(q, P_mbar, lambda_0_m, n_f, N_atm):
 # =============================================================================
 # UNIT CONVERSIONS AND CALIBRATION
 # =============================================================================
-lambda_0_m = wavelength * 1e-3   # 790e-9 m
+lambda_0_m = wavelength * 1e-3   # 800e-9 m
 
 gas = get_gas_properties(hhg_gas_type)
 print(f"Gas: {hhg_gas_type}, Ip = {gas['Ip_eV']:.2f} eV")
@@ -1505,7 +1527,7 @@ deconv_Is_per_h = {11: 8.02e13, 13: 2.77e13, 15: 2.60e13, 17: 1.51e13, 19: 3.06e
 n_lut = 80
 I_lut_min = 1e13
 I_lut_max = hhg_peak_intensity_Wcm2
-sfa_omega = 0.05767513
+sfa_omega = laser_omega_au
 sfa_Ip_au = gas['Ip_eV'] / 27.2114
 sfa_I_to_E0 = 3.5094e16
 hhg_lut_include_ppt = False
@@ -1518,6 +1540,22 @@ _lut_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 if os.path.exists(_lut_cache_file):
     print(f"  [LUT CACHE] Loading from {_lut_cache_file}")
     _lut_data = np.load(_lut_cache_file, allow_pickle=True)
+    if 'sfa_omega' in _lut_data.files:
+        cached_sfa_omega = float(_lut_data['sfa_omega'])
+        if not np.isclose(cached_sfa_omega, laser_omega_au, rtol=1e-3, atol=0.0):
+            raise RuntimeError(
+                f"LUT cache was generated with sfa_omega={cached_sfa_omega:.8f}, "
+                f"but this run is configured for {laser_wavelength_nm:.0f} nm ({laser_omega_au:.8f}). "
+                "Delete or regenerate the LUT cache."
+            )
+    if 'laser_wavelength_nm' in _lut_data.files:
+        cached_wavelength_nm = float(_lut_data['laser_wavelength_nm'])
+        if not np.isclose(cached_wavelength_nm, laser_wavelength_nm, rtol=1e-6, atol=1e-6):
+            raise RuntimeError(
+                f"LUT cache was generated for {cached_wavelength_nm:.3f} nm, "
+                f"but this run is configured for {laser_wavelength_nm:.3f} nm. "
+                "Delete or regenerate the LUT cache."
+            )
     I_lut = _lut_data['I_lut']
     n_lut = len(I_lut)
     I_lut_min = float(_lut_data['I_lut_min'])
@@ -1585,7 +1623,9 @@ else:
         I_lut=I_lut, I_lut_min=I_lut_min, I_lut_max=I_lut_max,
         dq_mag=multi_lut_save[21]['mag'], dq_phase=multi_lut_save[21]['phase'],
         multi_lut=multi_lut_save,
-        sfa_omega=sfa_omega, sfa_Ip_au=sfa_Ip_au, sfa_I_to_E0=sfa_I_to_E0)
+        sfa_omega=sfa_omega, sfa_Ip_au=sfa_Ip_au, sfa_I_to_E0=sfa_I_to_E0,
+        laser_wavelength_nm=np.float64(laser_wavelength_nm),
+        lut_wavelength_tag=np.array(lut_wavelength_tag))
     print(f"  [LUT CACHE] Saved to {_lut_cache_file}")
 
     for q_lut in multi_q_list_lut:
@@ -3220,6 +3260,7 @@ for mask_name in mask_configs_mc:
         yield_nf_total = 0.0
         E_q_main = None
         E_ff_main = None
+        I_ff_total = None
 
         for mode_idx in range(mc_n_modes_use):
             I_3d_m = mc_modes_I_Wcm2[mode_idx]
@@ -3255,6 +3296,10 @@ for mask_name in mask_configs_mc:
             else:
                 E_ff_mode = np.fft.fftshift(np.fft.fft2(E_q_mode)) * dx_hhg_m**2
             I_ff_mode = np.abs(E_ff_mode)**2
+            if I_ff_total is None:
+                I_ff_total = I_ff_mode.copy()
+            else:
+                I_ff_total += I_ff_mode
             yield_slit_total += np.sum(I_ff_mode * ff['mask_slit']) * dtheta_q**2
             yield_circ_total += np.sum(I_ff_mode * ff['mask_circ']) * dtheta_q**2
 
@@ -3326,7 +3371,9 @@ for mask_name in mask_configs_mc:
             'E_q': E_q_main,
             'E_ff': E_ff_main,
             'I_ff': np.abs(E_ff_main)**2 if E_ff_main is not None else None,
+            'I_ff_total': I_ff_total,
             'dtheta': dtheta_q,
+            'theta_axis': ff['theta_axis'],
             'buildup': buildup_mc,
             'yield_vs_z': yield_vs_z_mc if len(mc_z_gas_m) > 1 else None,
             'yield_vs_z_slit': yield_vs_z_slit_mc if len(mc_z_gas_m) > 1 else None,

@@ -169,12 +169,15 @@ print(f"Program started at {time.strftime('%H:%M:%S')}")
 NUM_WORKERS = os.cpu_count() or 4
 
 # Parameters (all in mm)
-wavelength = 790e-6     # wavelength (mm), 790 nm
+wavelength = 800e-6     # wavelength (mm), 800 nm
 k = 2 * np.pi / wavelength  # wave number (1/mm)
+laser_omega_au = 0.057  # 800 nm angular frequency in a.u.
+laser_wavelength_nm = wavelength * 1e6
+lut_wavelength_tag = f'lam{laser_wavelength_nm:.0f}nm'
 
 # Beam quality factors (M² = 1 for ideal Gaussian)
-M2x = 1.5  # M² in x direction
-M2y = 1.5  # M² in y direction
+M2x = 1.6  # M² in x direction
+M2y = 1.6  # M² in y direction
 _m2_tag = f'M2x{M2x:.2f}_M2y{M2y:.2f}'
 PHASE_SCREEN_SEED = 42  # Random seed for reproducible phase screen
 
@@ -3702,7 +3705,7 @@ def ionization_fraction_tbi_pulse(I_peak_Wcm2, Ip_au, Zc, l, m, alpha_tl, tau_fw
     E0_au = np.sqrt(I_au)
     # Pulse parameters in a.u.
     tau_au = tau_fwhm_fs * 1e-15 / 2.4189e-17  # FWHM in a.u.
-    omega_au = 0.05767513  # 790 nm angular frequency in a.u.
+    omega_au = laser_omega_au
     T_cycle = 2.0 * np.pi / omega_au
     # Time grid: +/-5*FWHM/2, step = T_cycle/20
     t_max = 5.0 * tau_au / 2.0
@@ -3790,7 +3793,7 @@ def calc_dk_dipole(I_onaxis_Wcm2, z_m, trajectory='short'):
 
 # --- Unit conversions ---
 z_m = z_focus_prop * 1e-3                  # z positions in meters
-lambda_0_m = wavelength * 1e-3             # 790e-9 m
+lambda_0_m = wavelength * 1e-3             # 800e-9 m
 z_focus_ub_m = true_focus_z_unblocked * 1e-3
 
 # Get gas properties
@@ -3899,7 +3902,7 @@ def build_tbi_ionization_lut_temporal(gas_params, tau_fwhm_fs, n_temporal=11,
 
     tau_au = tau_fwhm_fs * 1e-15 / 2.4189e-17
     sigma_au = tau_au / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-    omega_au = 0.05767513
+    omega_au = laser_omega_au
     T_cycle = 2.0 * np.pi / omega_au
 
     # Output time points: span FULL pulse (-1.5σ to +1.5σ)
@@ -4034,7 +4037,7 @@ deconv_Is_per_h = {11: 8.02e13, 13: 2.77e13, 15: 2.60e13, 17: 1.51e13, 19: 3.06e
 n_lut = 80
 I_lut_min = 1e13
 I_lut_max = hhg_peak_intensity_Wcm2
-sfa_omega = 0.05767513
+sfa_omega = laser_omega_au
 sfa_Ip_au = gas['Ip_eV'] / 27.2114
 sfa_I_to_E0 = 3.5094e16
 hhg_lut_include_ppt = False
@@ -4047,6 +4050,22 @@ _lut_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 if os.path.exists(_lut_cache_file):
     print(f"  [LUT CACHE] Loading from {_lut_cache_file}")
     _lut_data = np.load(_lut_cache_file, allow_pickle=True)
+    if 'sfa_omega' in _lut_data.files:
+        cached_sfa_omega = float(_lut_data['sfa_omega'])
+        if not np.isclose(cached_sfa_omega, laser_omega_au, rtol=1e-3, atol=0.0):
+            raise RuntimeError(
+                f"LUT cache was generated with sfa_omega={cached_sfa_omega:.8f}, "
+                f"but this run is configured for {laser_wavelength_nm:.0f} nm ({laser_omega_au:.8f}). "
+                "Delete or regenerate the LUT cache."
+            )
+    if 'laser_wavelength_nm' in _lut_data.files:
+        cached_wavelength_nm = float(_lut_data['laser_wavelength_nm'])
+        if not np.isclose(cached_wavelength_nm, laser_wavelength_nm, rtol=1e-6, atol=1e-6):
+            raise RuntimeError(
+                f"LUT cache was generated for {cached_wavelength_nm:.3f} nm, "
+                f"but this run is configured for {laser_wavelength_nm:.3f} nm. "
+                "Delete or regenerate the LUT cache."
+            )
     I_lut = _lut_data['I_lut']
     n_lut = len(I_lut)
     I_lut_min = float(_lut_data['I_lut_min'])
@@ -4114,7 +4133,9 @@ else:
         I_lut=I_lut, I_lut_min=I_lut_min, I_lut_max=I_lut_max,
         dq_mag=multi_lut_save[21]['mag'], dq_phase=multi_lut_save[21]['phase'],
         multi_lut=multi_lut_save,
-        sfa_omega=sfa_omega, sfa_Ip_au=sfa_Ip_au, sfa_I_to_E0=sfa_I_to_E0)
+        sfa_omega=sfa_omega, sfa_Ip_au=sfa_Ip_au, sfa_I_to_E0=sfa_I_to_E0,
+        laser_wavelength_nm=np.float64(laser_wavelength_nm),
+        lut_wavelength_tag=np.array(lut_wavelength_tag))
     print(f"  [LUT CACHE] Saved to {_lut_cache_file}")
 
     for q_lut in multi_q_list_lut:
@@ -6293,7 +6314,7 @@ print(f"{'='*60}")
 
 
 # --- SFA pulse parameters ---
-sfa_omega = 0.05767513     # 790 nm in a.u.
+sfa_omega = laser_omega_au     # 800 nm in a.u.
 sfa_n_cycles = 8
 sfa_dt = 0.5               # a.u.
 sfa_Tfull = 1000.0          # a.u., sufficient for 8 cycles
@@ -6337,6 +6358,20 @@ if os.path.exists(_lut_cache_file):
         return mag * np.exp(1j * phase)
     multi_lut = {int(k): {'mag': v['mag'], 'phase': v['phase']} for k, v in _lut_data['multi_lut'].item().items()}
     sfa_omega = float(_lut_data['sfa_omega'])
+    if not np.isclose(sfa_omega, laser_omega_au, rtol=1e-3, atol=0.0):
+        raise RuntimeError(
+            f"LUT cache was generated with sfa_omega={sfa_omega:.8f}, "
+            f"but this run is configured for {laser_wavelength_nm:.0f} nm ({laser_omega_au:.8f}). "
+            "Delete or regenerate the LUT cache."
+        )
+    if 'laser_wavelength_nm' in _lut_data.files:
+        cached_wavelength_nm = float(_lut_data['laser_wavelength_nm'])
+        if not np.isclose(cached_wavelength_nm, laser_wavelength_nm, rtol=1e-6, atol=1e-6):
+            raise RuntimeError(
+                f"LUT cache was generated for {cached_wavelength_nm:.3f} nm, "
+                f"but this run is configured for {laser_wavelength_nm:.3f} nm. "
+                "Delete or regenerate the LUT cache."
+            )
     sfa_Ip_au = float(_lut_data['sfa_Ip_au'])
     sfa_I_to_E0 = float(_lut_data['sfa_I_to_E0'])
     multi_lut_interp = {}

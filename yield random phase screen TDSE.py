@@ -81,6 +81,112 @@ def finalize_paper_figure(fig):
         style_paper_axis(ax)
 
 
+def save_tdse_mask_comparison_npz(mask_results, output_file):
+    """Save TDSE mask-comparison results in the plot_from_npz format."""
+    mask_names = np.array(['none', 'circular', 'twosided', 'diagonal'])
+    mask_labels = np.array(['No mask', 'Circular', 'Two-side', 'Diagonal'])
+    q_arr = np.array(multi_q_list, dtype=int)
+    center = N_hhg_2d // 2
+    x_um = x_hhg_2d * 1e3
+    extent_um = np.array([x_um[0], x_um[-1], x_um[0], x_um[-1]], dtype=float)
+    z_ref = np.asarray(mask_results['none']['z_gas_mm'], dtype=float)
+
+    n_q = len(q_arr)
+    n_m = len(mask_names)
+    n_x = len(x_um)
+    n_z = len(z_ref)
+
+    yield_slit = np.zeros((n_q, n_m), dtype=float)
+    yield_circ = np.zeros((n_q, n_m), dtype=float)
+    yield_nf = np.zeros((n_q, n_m), dtype=float)
+    nearfield_intensity_norm = np.zeros((n_q, n_m, n_x, n_x), dtype=float)
+    nearfield_peak_rel = np.zeros((n_q, n_m), dtype=float)
+    nearfield_lineout_x_norm = np.zeros((n_q, n_m, n_x), dtype=float)
+    nearfield_lineout_y_norm = np.zeros((n_q, n_m, n_x), dtype=float)
+    ff_theta_mrad = np.zeros((n_q, n_x), dtype=float)
+    ff_lineout_x_norm = np.zeros((n_q, n_m, n_x), dtype=float)
+    z_gas_mm = np.zeros((n_m, n_z), dtype=float)
+    gouy_grad = np.zeros((n_m, n_z), dtype=float)
+    yield_vs_z = np.full((n_q, n_m, n_z), np.nan, dtype=float)
+    yield_vs_z_slit = np.full((n_q, n_m, n_z), np.nan, dtype=float)
+    yield_vs_z_circ = np.full((n_q, n_m, n_z), np.nan, dtype=float)
+
+    def interp_to_ref(z_src, values):
+        if values is None:
+            return np.full(n_z, np.nan, dtype=float)
+        z_src = np.asarray(z_src, dtype=float)
+        values = np.asarray(values, dtype=float)
+        if len(z_src) == n_z and np.allclose(z_src, z_ref):
+            return values.copy()
+        return np.interp(z_ref, z_src, values)
+
+    for im, mn in enumerate(mask_names):
+        z_src = np.asarray(mask_results[mn]['z_gas_mm'], dtype=float)
+        z_gas_mm[im] = z_ref
+        gouy_grad[im] = interp_to_ref(z_src, mask_results[mn]['gouy_grad'])
+
+    for iq, q in enumerate(q_arr):
+        nf_global = max(
+            np.nanmax(np.abs(mask_results[mn]['per_q'][int(q)]['E_q'])**2)
+            for mn in mask_names
+        )
+        nf_global = max(float(nf_global), 1e-30)
+        ff_theta_mrad[iq] = np.asarray(mask_results['none']['per_q'][int(q)]['theta_axis'], dtype=float) * 1e3
+
+        for im, mn in enumerate(mask_names):
+            rq = mask_results[mn]['per_q'][int(q)]
+            yield_slit[iq, im] = rq['yield_slit']
+            yield_circ[iq, im] = rq['yield_circ']
+            yield_nf[iq, im] = rq['yield_nf']
+
+            I_nf = np.abs(rq['E_q'])**2
+            nearfield_intensity_norm[iq, im] = I_nf / nf_global
+            nearfield_peak_rel[iq, im] = np.nanmax(I_nf) / nf_global
+            nearfield_lineout_x_norm[iq, im] = I_nf[center, :] / nf_global
+            nearfield_lineout_y_norm[iq, im] = I_nf[:, center] / nf_global
+
+            line = np.asarray(rq['I_ff'], dtype=float)[center, :]
+            ff_lineout_x_norm[iq, im] = line / max(float(np.nanmax(line)), 1e-30)
+
+            z_src = np.asarray(mask_results[mn]['z_gas_mm'], dtype=float)
+            yield_vs_z[iq, im] = interp_to_ref(z_src, rq.get('yield_vs_z'))
+            yield_vs_z_slit[iq, im] = interp_to_ref(z_src, rq.get('yield_vs_z_slit'))
+            yield_vs_z_circ[iq, im] = interp_to_ref(z_src, rq.get('yield_vs_z_circ'))
+
+    np.savez_compressed(
+        output_file,
+        harmonic_orders=q_arr,
+        mask_names=mask_names,
+        mask_labels=mask_labels,
+        yield_slit=yield_slit,
+        yield_circ=yield_circ,
+        yield_nf=yield_nf,
+        nearfield_intensity_norm=nearfield_intensity_norm,
+        nearfield_peak_rel=nearfield_peak_rel,
+        nearfield_lineout_x_um=x_um,
+        nearfield_x_um=x_um,
+        nearfield_lineout_x_norm=nearfield_lineout_x_norm,
+        nearfield_lineout_y_norm=nearfield_lineout_y_norm,
+        nearfield_extent_um=extent_um,
+        ff_theta_mrad=ff_theta_mrad,
+        ff_lineout_x_norm=ff_lineout_x_norm,
+        z_gas_mm=z_gas_mm,
+        gouy_grad=gouy_grad,
+        yield_vs_z=yield_vs_z,
+        yield_vs_z_slit=yield_vs_z_slit,
+        yield_vs_z_circ=yield_vs_z_circ,
+        slit_half_angle_mrad=np.array(slit_half_angle_x * 1e3),
+        aperture_half_angle_mrad=np.array(aperture_half_angle * 1e3),
+        hhg_gas_type=np.array(hhg_gas_type),
+        hhg_gas_pressure=np.array(hhg_gas_pressure),
+        M2x=np.array(M2x),
+        M2y=np.array(M2y),
+        lavg_tag=np.array('tdse_rps'),
+        pressure_tag=np.array(f'P{hhg_gas_pressure:.0f}mbar'),
+    )
+    print(f"  Saved TDSE mask-comparison NPZ: {output_file}")
+
+
 configure_paper_matplotlib()
 
 # Try to use scipy.fft (faster) if available, fallback to numpy
@@ -164,12 +270,15 @@ print(f"Program started at {time.strftime('%H:%M:%S')}")
 NUM_WORKERS = os.cpu_count() or 4
 
 # Parameters (all in mm)
-wavelength = 790e-6     # wavelength (mm), 790 nm
+wavelength = 800e-6     # wavelength (mm), 800 nm
 k = 2 * np.pi / wavelength  # wave number (1/mm)
+laser_omega_au = 0.057  # 800 nm angular frequency in a.u.
+laser_wavelength_nm = wavelength * 1e6
+lut_wavelength_tag = f'lam{laser_wavelength_nm:.0f}nm'
 
 # Beam quality factors (M² = 1 for ideal Gaussian)
-M2x = 1.5  # M² in x direction
-M2y = 1.5  # M² in y direction
+M2x = 1.6  # M² in x direction
+M2y = 1.6  # M² in y direction
 _m2_tag = f'M2x{M2x:.2f}_M2y{M2y:.2f}'
 PHASE_SCREEN_SEED = 42  # Random seed for reproducible phase screen
 
@@ -3526,7 +3635,7 @@ def ionization_fraction_tbi_pulse(I_peak_Wcm2, Ip_au, Zc, l, m, alpha_tl, tau_fw
     E0_au = np.sqrt(I_au)
     # Pulse parameters in a.u.
     tau_au = tau_fwhm_fs * 1e-15 / 2.4189e-17  # FWHM in a.u.
-    omega_au = 0.05767513  # 790 nm angular frequency in a.u.
+    omega_au = laser_omega_au
     T_cycle = 2.0 * np.pi / omega_au
     # Time grid: +/-5*FWHM/2, step = T_cycle/20
     t_max = 5.0 * tau_au / 2.0
@@ -3589,7 +3698,7 @@ def calc_dk_plasma(q, P_mbar, lambda_0_m, n_f, N_atm):
     return -(q - 1.0 / q) * N_e * r_e * lambda_0_m
 
 # --- Unit conversions ---
-lambda_0_m = wavelength * 1e-3             # 790e-9 m
+lambda_0_m = wavelength * 1e-3             # 800e-9 m
 # Get gas properties
 gas = get_gas_properties(hhg_gas_type)
 print(f"Gas: {hhg_gas_type}, Ip = {gas['Ip_eV']:.2f} eV, delta_n = {gas['delta_n']:.2e} /bar")
@@ -3659,12 +3768,30 @@ gc.collect()
 
 # --- TDSE LUT loading ---
 _lut_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               '_lut_cache_tdse_argon.npz')
+                               f'_lut_cache_tdse_{hhg_gas_type}.npz')
 if not os.path.exists(_lut_cache_file):
     raise RuntimeError(f"TDSE LUT cache not found: {_lut_cache_file}\n"
-                       f"Run build_tdse_lut.py first to generate it.")
+                       f"Run build_tdse_lut.py first to generate the matching {laser_wavelength_nm:.0f} nm LUT.")
 print(f"  [TDSE LUT] Loading from {_lut_cache_file}")
 _lut_data = np.load(_lut_cache_file, allow_pickle=True)
+if 'sfa_omega' in _lut_data.files:
+    cached_sfa_omega = float(_lut_data['sfa_omega'])
+    if not np.isclose(cached_sfa_omega, laser_omega_au, rtol=1e-3, atol=0.0):
+        raise RuntimeError(
+            f"TDSE LUT cache was generated with sfa_omega={cached_sfa_omega:.8f}, "
+            f"but this run is configured for {laser_wavelength_nm:.0f} nm ({laser_omega_au:.8f}). "
+            "Regenerate the TDSE LUT cache."
+        )
+else:
+    raise RuntimeError("TDSE LUT cache is missing sfa_omega metadata. Regenerate it with build_tdse_lut.py.")
+if 'laser_wavelength_nm' in _lut_data.files:
+    cached_wavelength_nm = float(_lut_data['laser_wavelength_nm'])
+    if not np.isclose(cached_wavelength_nm, laser_wavelength_nm, rtol=1e-6, atol=1e-6):
+        raise RuntimeError(
+            f"TDSE LUT cache was generated for {cached_wavelength_nm:.3f} nm, "
+            f"but this run is configured for {laser_wavelength_nm:.3f} nm. "
+            "Regenerate the TDSE LUT cache."
+        )
 I_lut = _lut_data['I_lut']
 n_lut = len(I_lut)
 I_lut_min = float(_lut_data['I_lut_min'])
@@ -3702,7 +3829,7 @@ hhg_aperture_radius_mm = 1.0
 hhg_aperture_distance = 0.3
 slit_half_angle_x = (hhg_slit_width_mm / 2) * 1e-3 / hhg_slit_distance
 slit_half_angle_y = (hhg_slit_height_mm / 2) * 1e-3 / hhg_slit_distance
-aperture_half_angle = slit_half_angle_x  # for plotting compatibility
+aperture_half_angle = hhg_aperture_radius_mm * 1e-3 / hhg_aperture_distance
 
 # Far-field angular grid for H21 (used by plotting code)
 lambda_q_ref = lambda_0_m / hhg_harmonic_order
@@ -3961,6 +4088,11 @@ for mname in ['none', 'circular', 'twosided', 'diagonal']:
     print(f"  {mname:12s} {r['transmission']:7.1f} {r['peak_I']:12.2e} {nf_r:10.4f} {ap_r:10.4f}")
 
 # --- Figure HHG-10: Mask comparison (2×2) ---
+save_tdse_mask_comparison_npz(
+    mask_results,
+    f'hhg_mask_comparison_data_tdse_rps_P{hhg_gas_pressure:.0f}mbar_{_m2_tag}.npz',
+)
+
 fig10, axes10 = plt.subplots(2, 2, figsize=(15, 10.5))
 mask_colors = {'none': '#6E6E6E', 'circular': '#2F6F9F', 'twosided': '#B3262E', 'diagonal': '#218C4A'}
 mask_labels = {'none': 'No mask', 'circular': 'Circular', 'twosided': 'Two-side', 'diagonal': 'Diagonal'}
